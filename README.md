@@ -53,9 +53,11 @@ Rules:
 
 1. Open <https://script.google.com> → **New project**, name it *Statuser*.
 2. **Project Settings** → check *Show "appsscript.json" manifest file in editor*.
-3. In the editor, replace `appsscript.json` with [`src/appsscript.json`](src/appsscript.json),
-   delete `Code.gs` and add script files `Config`, `Logic`, `Calendar`, `Slack`
-   and `Main` with the contents of the matching files in `src/`.
+3. In the editor, replace the whole content of `appsscript.json` with
+   [`src/appsscript.json`](src/appsscript.json) and the whole content of `Code.gs`
+   with [`dist/Code.gs`](dist/Code.gs), all the code joined into one file
+   (`./bundle.sh` regenerates it from `src/`). Make sure no other script files
+   are left in the project, then save.
 4. **Project Settings** → **Script Properties** → add `SLACK_USER_TOKEN` with the
    token from step 1.
 
@@ -66,8 +68,10 @@ Alternatively push `src/` with [clasp](https://github.com/google/clasp)
 
 ### 3. Authorize and start
 
-1. In the editor select the `tick` function and click **Run**. Google asks for
-   two permissions: *See the events on Google calendars you own* and *Connect to an
+1. Run one check by hand: `tick` (in `Main`) is the function that does one run.
+   Open the `Main` file in the editor, pick `tick` in the function dropdown in the
+   toolbar (next to **Debug**) and click **Run**. Google asks for two
+   permissions: *See the events on Google calendars you own* and *Connect to an
    external service*.
 2. Check the execution log for errors.
 3. **Triggers** (alarm clock icon) → **Add Trigger**: function `tick`, event source
