@@ -86,6 +86,8 @@ Alternatively push `src/` with [clasp](https://github.com/google/clasp)
 - Logs are under **Executions** in the Apps Script editor. They only say what
   happened (e.g. *Applied meeting status*, *Restored own status*), never status
   texts or event details.
+- Status not changing as expected? Run `diagnose`: it lists the events running
+  right now, whether each counts and why, and what the next run will do.
 - `showState` logs a summary of the saved state (again without texts or event
   details), `resetState` forgets it. Run the latter only while no event status is
   set, otherwise that status becomes the baseline.

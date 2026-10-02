@@ -106,6 +106,15 @@ test('a manual change just before an event starts does not suppress it', () => {
   assert.deepEqual(sim.tick(at(11), events), LUNCH);
 });
 
+test('an event added after the previous check is not skipped by a manual change', () => {
+  const sim = simulate();
+  sim.tick(at(10, 5)); // no events yet
+  sim.slack.status = EMPTY; // status cleared by hand
+  // a 10:00 event created after the 10:05 check
+  assert.deepEqual(sim.tick(at(10, 10), [event('a', at(10), at(11))]), meeting(at(11)));
+  assert.deepEqual(sim.tick(at(11)), EMPTY);
+});
+
 test('a status cleared by hand during an event is respected', () => {
   const sim = simulate();
   const events = [event('a', at(10), at(11))];

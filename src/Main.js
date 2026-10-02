@@ -23,6 +23,8 @@ function tick() {
       const committed = commitWrite(state, setSlackStatus(write));
       props.setProperty(STATE_PROPERTY, JSON.stringify(committed));
       console.log(describeWrite(committed));
+    } else {
+      console.log('No change');
     }
   } finally {
     lock.releaseLock();
@@ -46,6 +48,37 @@ function showState() {
     pendingWrite: Boolean(s.pending),
     lastCheck: s.lastCheck ? new Date(s.lastCheck * 1000).toISOString() : null,
   }));
+}
+
+/**
+ * Explains what the next run would do and why, without status texts or event details.
+ * Run it from the editor when the status doesn't change as expected.
+ */
+function diagnose() {
+  const now = Math.floor(Date.now() / 1000);
+  const saved = PropertiesService.getScriptProperties().getProperty(STATE_PROPERTY);
+  const state = saved && JSON.parse(saved);
+  const current = getSlackStatus();
+  const events = fetchEvents(now);
+
+  const protectedNote = isProtected(current, CONFIG) ? ', with a protected emoji' : '';
+  console.log(`Slack status: ${isEmptyStatus(current) ? 'empty' : 'set'}${protectedNote}`);
+  console.log(`Events in your primary calendar right now: ${events.length}`);
+  if (!events.length) {
+    console.log('Is the event running right now (Google suggests the next half hour for new events) ' +
+      'and is it in your own calendar, not in another one?');
+  }
+  for (const ev of events) {
+    const layer = eventLayer(ev);
+    let verdict = layer ? `counts as ${layer}` : 'ignored';
+    if (layer && !CONFIG.statuses[layer]) verdict = `${layer}, disabled in CONFIG`;
+    if (!(ev.start <= now && now < ev.end)) verdict += ', not running yet';
+    if (state && ev.id in state.suppressed) verdict += ', skipped after a manual change';
+    console.log(`- ${ev.allDay ? 'all-day' : 'timed'} ${ev.eventType} event, ` +
+      `${ev.transparent ? 'free' : 'busy'}, my response: ${ev.myResponse || 'none (own event)'}: ${verdict}`);
+  }
+  const { write } = decide(state, current, events, now, CONFIG);
+  console.log(write ? 'The next run will change the status' : 'The next run will change nothing');
 }
 
 /**

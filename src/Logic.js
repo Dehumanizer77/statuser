@@ -16,7 +16,9 @@
  *            myResponse: ?string, start: number, end: number}} CalEvent
  * @typedef {{status: Status, applied: ?string}} Write
  * @typedef {{baseline: Status, lastSeen: Status, applied: ?string,
- *            suppressed: Object<string, number>, lastCheck: ?number, pending?: Write}} State
+ *            suppressed: Object<string, number>, running: Object<string, number>,
+ *            lastCheck: ?number, pending?: Write}} State
+ *   `suppressed` and `running` map event IDs to their end time.
  */
 
 /** Highest priority first. */
@@ -111,7 +113,8 @@ function commitWrite(state, written) {
 function decide(prev, current, events, now, config) {
   const state = prev
     ? resolvePending({ ...prev, suppressed: { ...prev.suppressed } }, current)
-    : { baseline: current, lastSeen: current, applied: null, suppressed: {}, lastCheck: null };
+    : { baseline: current, lastSeen: current, applied: null, suppressed: {}, running: {}, lastCheck: null };
+  const wasRunning = state.running || {};
 
   for (const id of Object.keys(state.suppressed)) {
     if (state.suppressed[id] <= now) delete state.suppressed[id];
@@ -130,16 +133,14 @@ function decide(prev, current, events, now, config) {
       // If it was ours, the baseline gets restored below.
       if (!state.applied) state.baseline = EMPTY_STATUS;
     } else {
-      // Changed by hand: it becomes the new baseline and events that were already
-      // running at the previous check are no longer enforced. Events that started
-      // since then still override it. A protected status is a pause rather than
-      // a skip: the events resume once it's gone.
+      // Changed by hand: it becomes the new baseline and events seen running at the
+      // previous check are no longer enforced. Events that started (or were added
+      // to the calendar) since then still override it. A protected status is
+      // a pause rather than a skip: the events resume once it's gone.
       state.baseline = current;
       if (!isProtected(current, config)) {
         for (const a of active) {
-          if (state.lastCheck !== null && a.ev.start <= state.lastCheck) {
-            state.suppressed[a.ev.id] = a.ev.end;
-          }
+          if (a.ev.id in wasRunning) state.suppressed[a.ev.id] = a.ev.end;
         }
       }
     }
@@ -147,6 +148,8 @@ function decide(prev, current, events, now, config) {
     state.lastSeen = current;
   }
   state.lastCheck = now;
+  state.running = {};
+  for (const a of active) state.running[a.ev.id] = a.ev.end;
   // Don't keep an expired status around, it would never be restored anyway.
   state.baseline = baselineAt(state.baseline, now);
 

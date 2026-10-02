@@ -103,6 +103,7 @@ test('logs contain no status texts, emoji or event IDs', () => {
   const app = loadApp();
   app.calendar.pages = [{ items: [gEvent('evt-SECRET-ID', at(10), at(11))] }];
   app.run('tick', at(9, 59));
+  app.run('diagnose', at(10));
   app.run('tick', at(10));
   app.run('tick', at(11));
   app.run('showState');
@@ -112,9 +113,32 @@ test('logs contain no status texts, emoji or event IDs', () => {
   for (const secret of ['SECRET-MARKER', ':hospital:', 'evt-SECRET-ID']) {
     assert.ok(!output.includes(secret), `logs contain ${secret}`);
   }
+  assert.match(output, /No change/);
   assert.match(output, /Applied meeting status/);
   assert.match(output, /Restored own status/);
   assert.match(output, /"baselineSet":true/);
+});
+
+test('diagnose explains why an event does or does not count', () => {
+  const app = loadApp();
+  app.calendar.pages = [{
+    items: [
+      gEvent('a', at(10), at(11)),
+      gEvent('b', at(10), at(11), { attendees: [{ self: true, responseStatus: 'needsAction' }] }),
+    ],
+  }];
+  app.run('diagnose', at(10));
+  const output = app.logs.join('\n');
+  assert.match(output, /Events in your primary calendar right now: 2/);
+  assert.match(output, /my response: none \(own event\): counts as meeting/);
+  assert.match(output, /my response: needsAction: ignored/);
+  assert.match(output, /The next run will change the status/);
+  assert.equal(app.slack.writes, 0);
+  assert.equal(app.props.data.STATE, undefined);
+
+  const empty = loadApp();
+  empty.run('diagnose', at(10));
+  assert.match(empty.logs.join('\n'), /Events in your primary calendar right now: 0\nIs the event running/);
 });
 
 test('a Slack write whose state commit fails is recognized on the next run', () => {
