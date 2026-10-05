@@ -14,7 +14,7 @@ function tick() {
 
     const current = getSlackStatus();
     const events = fetchEvents(now);
-    const { state, write } = decide(saved && JSON.parse(saved), current, events, now, CONFIG);
+    const { state, write } = decide(saved && JSON.parse(saved), current, events, now, loadConfig());
 
     // Saved before writing: if the write goes through but this run dies before
     // committing it, the next run recognizes it instead of taking it for a manual change.
@@ -41,7 +41,7 @@ function showState() {
   const s = JSON.parse(saved);
   console.log(JSON.stringify({
     baselineSet: !isEmptyStatus(s.baseline),
-    baselineProtected: isProtected(s.baseline, CONFIG),
+    baselineProtected: isProtected(s.baseline, loadConfig()),
     baselineExpires: s.baseline.expiration > 0,
     applied: s.applied,
     skippedEvents: Object.keys(s.suppressed).length,
@@ -61,7 +61,8 @@ function diagnose() {
   const current = getSlackStatus();
   const events = fetchEvents(now);
 
-  const protectedNote = isProtected(current, CONFIG) ? ', with a protected emoji' : '';
+  const config = loadConfig();
+  const protectedNote = isProtected(current, config) ? ', with a protected emoji' : '';
   console.log(`Slack status: ${isEmptyStatus(current) ? 'empty' : 'set'}${protectedNote}`);
   console.log(`Events in your primary calendar right now: ${events.length}`);
   if (!events.length) {
@@ -71,13 +72,13 @@ function diagnose() {
   for (const ev of events) {
     const layer = eventLayer(ev);
     let verdict = layer ? `counts as ${layer}` : 'ignored';
-    if (layer && !CONFIG.statuses[layer]) verdict = `${layer}, disabled in CONFIG`;
+    if (layer && !config.statuses[layer]) verdict = `${layer}, disabled in settings`;
     if (!(ev.start <= now && now < ev.end)) verdict += ', not running yet';
     if (state && ev.id in state.suppressed) verdict += ', skipped after a manual change';
     console.log(`- ${ev.allDay ? 'all-day' : 'timed'} ${ev.eventType} event, ` +
       `${ev.transparent ? 'free' : 'busy'}, my response: ${ev.myResponse || 'none (own event)'}: ${verdict}`);
   }
-  const { write } = decide(state, current, events, now, CONFIG);
+  const { write } = decide(state, current, events, now, config);
   console.log(write ? 'The next run will change the status' : 'The next run will change nothing');
 }
 

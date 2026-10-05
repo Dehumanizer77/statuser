@@ -14,7 +14,7 @@ on your primary calendar, and decides:
 1. A status you set yourself is remembered as the *baseline*.
 2. While an event runs, its status is set (highest priority wins):
 
-   | Event | Status (default, see `src/Config.js`) |
+   | Event | Default status (change it on the [settings page](#4-settings-page)) |
    |---|---|
    | Out of office | :palm_tree: Out of office |
    | Meeting | :calendar: In a meeting |
@@ -33,11 +33,12 @@ Rules:
 - Status text is always generic, event titles are never shown or even downloaded.
 - **A manual change during an event wins:** that event is no longer enforced and
   nothing is restored when it ends. The next event overrides the status again.
-- **Protected emoji** (`protectedEmoji` in `src/Config.js`): a status with one of
-  them is never overwritten. Setting one during an event pauses it rather than
-  skipping it: once the protected status is gone, the event status comes back.
-- Our status is set to expire 5 minutes after the event ends, so it can't get stuck
-  when the script stops running. Once it runs again, the baseline comes back.
+- **Protected emoji** (set on the settings page): a status with one of them is
+  never overwritten. Setting one during an event pauses it rather than skipping
+  it: once the protected status is gone, the event status comes back.
+- Our status is set to expire a few minutes (5 by default) after the event ends,
+  so it can't get stuck when the script stops running. Once it runs again, the
+  baseline comes back.
 
 ## Setup
 
@@ -68,17 +69,30 @@ Alternatively push `src/` with [clasp](https://github.com/google/clasp)
 
 ### 3. Authorize and start
 
-1. Run one check by hand: `tick` (in `Main`) is the function that does one run.
-   Open the `Main` file in the editor, pick `tick` in the function dropdown in the
-   toolbar (next to **Debug**) and click **Run**. Google asks for two
-   permissions: *See the events on Google calendars you own* and *Connect to an
-   external service*.
+1. Run one check by hand: `tick` is the function that does one run. Pick it in the
+   function dropdown in the editor's toolbar (next to **Debug**) and click **Run**.
+   Google asks for two permissions: *See the events on Google calendars you own*
+   and *Connect to an external service*.
 2. Check the execution log for errors.
 3. **Triggers** (alarm clock icon) → **Add Trigger**: function `tick`, event source
    *Time-driven*, type *Minutes timer*, *Every minute*.
 
+### 4. Settings page
+
+The statuses, protected emoji and the safety margin are set on a small web page.
+Settings are stored apart from the code, so pasting a new `Code.gs` keeps them.
+
+1. In the editor: **Deploy** → **Test deployments**.
+2. Next to *Select type* click the gear icon → **Web app**.
+3. Copy the **URL** (it ends with `/dev`), open it and bookmark it.
+
+Only people with edit access to the project can open the `/dev` URL, i.e. only
+you. It always runs the latest saved code, so there's nothing to redeploy.
+
 ## Usage
 
+- **Change statuses, emoji or protected emoji** on the settings page. Changes
+  apply from the next run, within a minute.
 - **Pause** Statuser for a while, also in the middle of an event: set a status with
   a protected emoji (e.g. `:lock:`) and Slack's *Clear after…*. When it expires,
   a running event gets applied.
@@ -108,15 +122,22 @@ Alternatively push `src/` with [clasp](https://github.com/google/clasp)
   Script project can read the token and change what runs under your account, so
   **don't share the project**. Everyone who wants Statuser makes their own copy
   with their own token.
+- The settings page is only reachable through the test deployment (`/dev`), which
+  needs edit access. The manifest also limits any regular web app deployment to
+  you (`"access": "MYSELF"`), so don't create one with wider access.
 - The token doesn't expire. If it may have leaked: open the Slack app settings →
   **OAuth & Permissions** → **Revoke All OAuth Tokens** → **Revoke Tokens**, then
   **Reinstall to Workspace** and put the new token into `SLACK_USER_TOKEN`.
 
 ## Development
 
-The decision logic in `src/Logic.js` is pure and tested directly
-(`test/logic.test.js`); `test/tick.test.js` runs the whole `tick()` against fake
-Slack, Calendar and properties services, including failures halfway through a run.
+The decision logic in `src/Logic.js` and the settings validation in
+`src/Settings.js` are pure and tested directly (`test/logic.test.js`,
+`test/settings.test.js`); `test/tick.test.js` runs the whole `tick()` and the
+settings page's server functions against fake Slack, Calendar and properties
+services, including failures halfway through a run.
+
+After changing anything in `src/`, run `./bundle.sh` to regenerate `dist/Code.gs`.
 
 ```sh
 node --test

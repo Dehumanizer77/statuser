@@ -6,10 +6,12 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 // Apps Script files are plain scripts sharing one global scope, load them the same way.
-for (const file of ['Config.js', 'Logic.js']) {
+for (const file of ['Config.js', 'Logic.js', 'Settings.js']) {
   vm.runInThisContext(fs.readFileSync(path.join(__dirname, '..', 'src', file), 'utf8'), { filename: file });
 }
-const { decide, commitWrite, CONFIG } = vm.runInThisContext('({ decide, commitWrite, CONFIG })');
+const { decide, commitWrite, toConfig, DEFAULT_SETTINGS } =
+  vm.runInThisContext('({ decide, commitWrite, toConfig, DEFAULT_SETTINGS })');
+const CONFIG = toConfig(DEFAULT_SETTINGS);
 
 const DAY = 1790035200; // some midnight, the exact date doesn't matter
 const at = (h, m = 0) => DAY + h * 3600 + m * 60;

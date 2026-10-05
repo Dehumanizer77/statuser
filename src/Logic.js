@@ -19,6 +19,9 @@
  *            suppressed: Object<string, number>, running: Object<string, number>,
  *            lastCheck: ?number, pending?: Write}} State
  *   `suppressed` and `running` map event IDs to their end time.
+ * @typedef {{statuses: Object<string, ?{emoji: string, text: string}>,
+ *            protectedEmoji: string[], safetyMarginMinutes: number}} Config
+ *   built from the settings by toConfig(); a disabled kind of event is null.
  */
 
 /** Highest priority first. */
@@ -106,7 +109,7 @@ function commitWrite(state, written) {
  * @param {Status} current     status currently set in Slack
  * @param {CalEvent[]} events  calendar events around `now`
  * @param {number} now         unix seconds
- * @param {typeof CONFIG} config
+ * @param {Config} config
  * @returns {{state: State, write: ?Status}} the new state and the status to set (null = keep).
  *   When writing, the state holds it as `pending`; pass it to commitWrite() once Slack confirms.
  */

@@ -11,5 +11,6 @@
     "https://www.googleapis.com/auth/calendar.events.owned.readonly",
     "https://www.googleapis.com/auth/script.external_request"
   ],
-  "urlFetchWhitelist": ["https://slack.com/api/"]
+  "urlFetchWhitelist": ["https://slack.com/api/"],
+  "webapp": { "executeAs": "USER_DEPLOYING", "access": "MYSELF" }
 }

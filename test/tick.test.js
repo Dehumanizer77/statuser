@@ -6,7 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const SRC = path.join(__dirname, '..', 'src');
-const FILES = ['Config.js', 'Logic.js', 'Calendar.js', 'Slack.js', 'Main.js'];
+const FILES = ['Config.js', 'Logic.js', 'Settings.js', 'SettingsPage.js', 'Calendar.js', 'Slack.js', 'Main.js'];
 
 const DAY = 1790035200; // some midnight, the exact date doesn't matter
 const at = (h, m = 0) => DAY + h * 3600 + m * 60;
@@ -44,6 +44,14 @@ function loadApp(status = SECRET) {
   const ctx = vm.createContext({
     console: { log: (...args) => logs.push(args.join(' ')) },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
+    HtmlService: {
+      createHtmlOutput: (html) => ({
+        html,
+        meta: {},
+        setTitle(title) { this.title = title; return this; },
+        addMetaTag(name, content) { this.meta[name] = content; return this; },
+      }),
+    },
     PropertiesService: { getScriptProperties: () => props },
     Utilities: { parseDate: (date) => new Date(`${date}T00:00:00Z`) },
     Calendar: {
@@ -90,6 +98,10 @@ function loadApp(status = SECRET) {
     run(fn, now) {
       if (now !== undefined) vm.runInContext(`Date.now = () => ${now * 1000}`, ctx);
       vm.runInContext(`${fn}()`, ctx);
+    },
+    /** Calls a function the way the settings page does; returns a plain copy of the result. */
+    call(fn, ...args) {
+      return JSON.parse(JSON.stringify(ctx[fn](...JSON.parse(JSON.stringify(args)))));
     },
     /** Makes the n-th setProperty call of the next run throw. */
     failSetProperty(n) {
@@ -244,4 +256,44 @@ test('a failing calendar page leaves the status alone', () => {
   assert.throws(() => app.run('tick', at(10)), /Calendar unavailable/);
   assert.equal(app.slack.writes, 0);
   assert.deepEqual(app.slack.status, SECRET);
+});
+
+test('settings saved on the page are used by the next run', () => {
+  const app = loadApp();
+  app.calendar.pages = [{ items: [gEvent('a', at(10), at(11))] }];
+  const { settings } = app.call('getSettingsForPage');
+  settings.statuses.meeting = { enabled: true, emoji: 'date', text: 'On a call' };
+  const result = app.call('saveSettingsFromPage', { ...settings, protectedEmoji: ':lock:', safetyMarginMinutes: '10' });
+  assert.deepEqual(result.errors, {});
+  assert.equal(result.settings.statuses.meeting.emoji, ':date:');
+
+  app.run('tick', at(10));
+  assert.deepEqual(app.slack.status, { text: 'On a call', emoji: ':date:', expiration: at(11) + 600 });
+});
+
+test('invalid settings from the page are not saved', () => {
+  const app = loadApp();
+  const { settings } = app.call('getSettingsForPage');
+  settings.statuses.meeting.emoji = '';
+  const result = app.call('saveSettingsFromPage', settings);
+  assert.equal(result.settings, null);
+  assert.ok(result.errors['meeting.emoji']);
+  assert.equal(app.props.data.SETTINGS, undefined);
+});
+
+test('a kind of event disabled in the settings is ignored', () => {
+  const app = loadApp();
+  app.calendar.pages = [{ items: [gEvent('a', at(10), at(11))] }];
+  const { settings } = app.call('getSettingsForPage');
+  settings.statuses.meeting.enabled = false;
+  assert.deepEqual(app.call('saveSettingsFromPage', settings).errors, {});
+  app.run('tick', at(10));
+  assert.equal(app.slack.writes, 0);
+});
+
+test('the settings page is served with a script that parses', () => {
+  const page = loadApp().call('doGet');
+  assert.equal(page.title, 'Statuser settings');
+  const script = page.html.match(/<script>([\s\S]*)<\/script>/)[1];
+  assert.doesNotThrow(() => new vm.Script(script));
 });

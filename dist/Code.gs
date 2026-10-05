@@ -3,16 +3,18 @@
 // ---- Config.js ----
 
 /**
- * Statuser configuration. Edit freely, changes apply on the next run.
+ * Default settings. Change them on the settings page (see README) rather than
+ * here: saved settings are kept apart from the code, so pasting a new version
+ * of the code doesn't reset them.
  */
-const CONFIG = {
+const DEFAULT_SETTINGS = {
   // Status for each kind of event, highest priority first (see LAYER_PRIORITY).
-  // Set a kind to null to ignore those events completely.
+  // A disabled kind of event is ignored completely.
   statuses: {
-    outOfOffice: { emoji: ':palm_tree:', text: 'Out of office' },
-    meeting: { emoji: ':calendar:', text: 'In a meeting' },
-    focusTime: { emoji: ':headphones:', text: 'Focus time' },
-    allDay: { emoji: ':calendar:', text: 'Busy' },
+    outOfOffice: { enabled: true, emoji: ':palm_tree:', text: 'Out of office' },
+    meeting: { enabled: true, emoji: ':calendar:', text: 'In a meeting' },
+    focusTime: { enabled: true, emoji: ':headphones:', text: 'Focus time' },
+    allDay: { enabled: true, emoji: ':calendar:', text: 'Busy' },
   },
 
   // A manually set status with one of these emoji is never overwritten.
@@ -47,6 +49,9 @@ const CONFIG = {
  *            suppressed: Object<string, number>, running: Object<string, number>,
  *            lastCheck: ?number, pending?: Write}} State
  *   `suppressed` and `running` map event IDs to their end time.
+ * @typedef {{statuses: Object<string, ?{emoji: string, text: string}>,
+ *            protectedEmoji: string[], safetyMarginMinutes: number}} Config
+ *   built from the settings by toConfig(); a disabled kind of event is null.
  */
 
 /** Highest priority first. */
@@ -134,7 +139,7 @@ function commitWrite(state, written) {
  * @param {Status} current     status currently set in Slack
  * @param {CalEvent[]} events  calendar events around `now`
  * @param {number} now         unix seconds
- * @param {typeof CONFIG} config
+ * @param {Config} config
  * @returns {{state: State, write: ?Status}} the new state and the status to set (null = keep).
  *   When writing, the state holds it as `pending`; pass it to commitWrite() once Slack confirms.
  */
@@ -197,6 +202,402 @@ function decide(prev, current, events, now, config) {
   return { state, write: desired };
 }
 
+// ---- Settings.js ----
+
+/**
+ * Settings: stored as JSON in the script properties, edited on the settings page
+ * (SettingsPage.js), served as a web app only you can open.
+ */
+const SETTINGS_PROPERTY = 'SETTINGS';
+
+/** ":name:", optionally with a skin tone, e.g. ":wave::skin-tone-3:". */
+const EMOJI_PATTERN = /^:[a-z0-9_+'.-]+:(:skin-tone-[2-6]:)?$/;
+
+/** Slack's limit for a status text. */
+const MAX_STATUS_TEXT = 100;
+
+/** "palm_tree", " :Palm_Tree: " etc. become ":palm_tree:". */
+function normalizeEmoji(value) {
+  const name = String(value).trim().toLowerCase().replace(/^:+|:+$/g, '');
+  return name ? `:${name}:` : '';
+}
+
+/** Saved settings on top of the defaults; anything missing falls back to them. */
+function withDefaults(saved) {
+  const s = saved || {};
+  const savedStatuses = s.statuses || {};
+  const statuses = {};
+  for (const layer of LAYER_PRIORITY) {
+    statuses[layer] = { ...DEFAULT_SETTINGS.statuses[layer], ...savedStatuses[layer] };
+  }
+  return {
+    statuses,
+    protectedEmoji: Array.isArray(s.protectedEmoji) ? s.protectedEmoji : DEFAULT_SETTINGS.protectedEmoji,
+    safetyMarginMinutes: Number.isInteger(s.safetyMarginMinutes)
+      ? s.safetyMarginMinutes
+      : DEFAULT_SETTINGS.safetyMarginMinutes,
+  };
+}
+
+/** @returns {Config} settings in the shape decide() takes */
+function toConfig(settings) {
+  const statuses = {};
+  for (const layer of LAYER_PRIORITY) {
+    const { enabled, emoji, text } = settings.statuses[layer];
+    statuses[layer] = enabled ? { emoji, text } : null;
+  }
+  return {
+    statuses,
+    protectedEmoji: settings.protectedEmoji,
+    safetyMarginMinutes: settings.safetyMarginMinutes,
+  };
+}
+
+/**
+ * Checks and cleans settings sent by the settings page.
+ * @returns {{settings: ?Object, errors: Object<string, string>}} errors by field ID,
+ *   settings only when there are none
+ */
+function validateSettings(input) {
+  const errors = {};
+
+  const statuses = {};
+  for (const layer of LAYER_PRIORITY) {
+    const raw = (input.statuses || {})[layer] || {};
+    const status = {
+      enabled: raw.enabled === true,
+      emoji: normalizeEmoji(raw.emoji || ''),
+      text: String(raw.text || '').trim(),
+    };
+    // A disabled kind may be left half filled in, it isn't used.
+    if (status.enabled) {
+      if (!EMOJI_PATTERN.test(status.emoji)) {
+        errors[`${layer}.emoji`] = 'Enter an emoji name, e.g. :calendar:';
+      }
+      if (!status.text) errors[`${layer}.text`] = 'Enter a status text';
+    }
+    if (status.text.length > MAX_STATUS_TEXT) {
+      errors[`${layer}.text`] = `At most ${MAX_STATUS_TEXT} characters`;
+    }
+    statuses[layer] = status;
+  }
+
+  const protectedEmoji = [];
+  const list = Array.isArray(input.protectedEmoji) ? input.protectedEmoji.join(' ') : input.protectedEmoji;
+  for (const part of String(list || '').split(/[\s,]+/)) {
+    if (!part) continue;
+    const emoji = normalizeEmoji(part);
+    if (!EMOJI_PATTERN.test(emoji)) {
+      errors.protectedEmoji = `Not an emoji name: ${part}`;
+    } else if (protectedEmoji.indexOf(emoji) === -1) {
+      protectedEmoji.push(emoji);
+    }
+  }
+
+  const margin = Number(input.safetyMarginMinutes);
+  if (!Number.isInteger(margin) || margin < 1 || margin > 60) {
+    errors.safetyMarginMinutes = 'A whole number from 1 to 60';
+  }
+
+  if (Object.keys(errors).length) return { settings: null, errors };
+  return { settings: { statuses, protectedEmoji, safetyMarginMinutes: margin }, errors };
+}
+
+/** Saved settings merged with the defaults. */
+function loadSettings() {
+  const saved = PropertiesService.getScriptProperties().getProperty(SETTINGS_PROPERTY);
+  return withDefaults(saved ? JSON.parse(saved) : null);
+}
+
+/** @returns {Config} the configuration runs use */
+function loadConfig() {
+  return toConfig(loadSettings());
+}
+
+/** Serves the settings page. */
+function doGet() {
+  return HtmlService.createHtmlOutput(SETTINGS_PAGE)
+    .setTitle('Statuser settings')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/** Called by the settings page when it opens. */
+function getSettingsForPage() {
+  return { settings: loadSettings(), defaults: DEFAULT_SETTINGS };
+}
+
+/**
+ * Called by the settings page to save.
+ * @returns {{settings: ?Object, errors: Object<string, string>}} the saved settings, or errors by field
+ */
+function saveSettingsFromPage(input) {
+  const result = validateSettings(input);
+  if (result.settings) {
+    PropertiesService.getScriptProperties().setProperty(SETTINGS_PROPERTY, JSON.stringify(result.settings));
+  }
+  return result;
+}
+
+// ---- SettingsPage.js ----
+
+/**
+ * The settings page served by doGet(). Kept as a string so the whole app stays
+ * plain script files (the editor and bundle.sh need nothing else).
+ * Note: it's a String.raw template, so the page must not contain backticks or "${".
+ */
+const SETTINGS_PAGE = String.raw`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<base target="_top">
+<style>
+  :root {
+    --bg: #f5f6fa; --card: #ffffff; --text: #1c2230; --muted: #5d6576;
+    --border: #dde1ea; --input: #ffffff; --accent: #4263eb; --accent-text: #ffffff;
+    --error: #c92a2a; --ok: #2b8a3e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #13151b; --card: #1c1f27; --text: #e7e9ef; --muted: #9ba3b4;
+      --border: #333a47; --input: #161920; --accent: #748ffc; --accent-text: #0f1218;
+      --error: #ff8787; --ok: #69db7c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 780px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { font-size: 24px; line-height: 1.2; margin: 0 0 6px; }
+  h2 { font-size: 16px; margin: 0 0 4px; }
+  p { margin: 0; }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  section {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px; margin-top: 20px;
+  }
+  .row {
+    display: grid; grid-template-columns: 190px 170px 1fr; gap: 12px;
+    padding: 14px 0; align-items: start;
+  }
+  .row + .row { border-top: 1px solid var(--border); }
+  .kind { display: flex; gap: 10px; align-items: flex-start; font-weight: 600; padding-top: 22px; }
+  .kind input { margin: 4px 0 0; width: 16px; height: 16px; accent-color: var(--accent); }
+  .kind .small { font-weight: 400; }
+  label.field-label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  input[type=text], input[type=number] {
+    width: 100%; padding: 8px 10px; font: inherit; color: var(--text);
+    background: var(--input); border: 1px solid var(--border); border-radius: 8px;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  input:disabled { opacity: 0.5; }
+  input[aria-invalid=true] { border-color: var(--error); }
+  .error { color: var(--error); font-size: 13px; min-height: 0; margin-top: 4px; }
+  .error:empty { display: none; }
+  .inline { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+  .inline input { width: 90px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 24px; }
+  button {
+    font: inherit; font-weight: 600; padding: 9px 18px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--card); color: var(--text);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button:disabled { opacity: 0.6; cursor: default; }
+  #message.ok { color: var(--ok); }
+  #message.error { color: var(--error); }
+  @media (max-width: 640px) {
+    .row { grid-template-columns: 1fr; gap: 8px; }
+    .kind { padding-top: 0; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Statuser settings</h1>
+  <p class="muted">Your Slack status during calendar events. Changes apply from the next run, within a minute.</p>
+
+  <p id="loading" class="muted" style="margin-top: 24px">Loading…</p>
+
+  <div id="content" hidden>
+    <section>
+      <h2>Statuses</h2>
+      <p class="muted small">Highest priority first: when events overlap, the upper one wins.
+        Find an emoji's exact name by hovering over it in Slack's emoji picker.</p>
+      <div id="kinds"></div>
+    </section>
+
+    <section>
+      <h2>Protected emoji</h2>
+      <p class="muted small">A status you set yourself with one of these emoji is never overwritten.
+        Set one with Slack's "Clear after…" to pause Statuser for a while.
+        Separate them with spaces or commas.</p>
+      <div style="margin-top: 10px">
+        <input type="text" id="protectedEmoji" aria-label="Protected emoji"
+          placeholder=":lock: :face_with_thermometer:" autocomplete="off" spellcheck="false">
+        <div class="error" id="protectedEmoji-error"></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Safety margin</h2>
+      <p class="muted small">Statuser's status expires this long after the event ends, so it can't
+        get stuck if the script stops running.</p>
+      <div class="inline">
+        <input type="number" id="safetyMarginMinutes" min="1" max="60" step="1"
+          aria-label="Safety margin in minutes">
+        <span>minutes</span>
+      </div>
+      <div class="error" id="safetyMarginMinutes-error"></div>
+    </section>
+
+    <div class="actions">
+      <button type="button" class="primary" id="save">Save</button>
+      <button type="button" id="defaults">Fill in defaults</button>
+      <p id="message" role="status"></p>
+    </div>
+  </div>
+</main>
+
+<script>
+  var KINDS = [
+    ['outOfOffice', 'Out of office', 'Out-of-office events'],
+    ['meeting', 'Meeting', 'Timed events shown as busy'],
+    ['focusTime', 'Focus time', 'Focus time events'],
+    ['allDay', 'All-day event', 'Any all-day event']
+  ];
+  var defaults = null;
+
+  function el(id) { return document.getElementById(id); }
+
+  function field(id, label, placeholder, maxlength) {
+    return '<div><label class="field-label" for="' + id + '">' + label + '</label>' +
+      '<input type="text" id="' + id + '" placeholder="' + placeholder + '" maxlength="' +
+      maxlength + '" autocomplete="off" spellcheck="false">' +
+      '<div class="error" id="' + id + '-error"></div></div>';
+  }
+
+  function buildRows() {
+    KINDS.forEach(function (kind) {
+      var id = kind[0];
+      var row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML =
+        '<label class="kind"><input type="checkbox" id="' + id + '.enabled">' +
+        '<span>' + kind[1] + '<br><span class="small muted">' + kind[2] + '</span></span></label>' +
+        field(id + '.emoji', 'Emoji', ':calendar:', 80) +
+        field(id + '.text', 'Status text', 'In a meeting', 100);
+      el('kinds').appendChild(row);
+      el(id + '.enabled').addEventListener('change', updateEnabled);
+    });
+  }
+
+  function updateEnabled() {
+    KINDS.forEach(function (kind) {
+      var on = el(kind[0] + '.enabled').checked;
+      el(kind[0] + '.emoji').disabled = !on;
+      el(kind[0] + '.text').disabled = !on;
+    });
+  }
+
+  function fill(settings) {
+    KINDS.forEach(function (kind) {
+      var status = settings.statuses[kind[0]];
+      el(kind[0] + '.enabled').checked = status.enabled;
+      el(kind[0] + '.emoji').value = status.emoji;
+      el(kind[0] + '.text').value = status.text;
+    });
+    el('protectedEmoji').value = settings.protectedEmoji.join(' ');
+    el('safetyMarginMinutes').value = settings.safetyMarginMinutes;
+    updateEnabled();
+  }
+
+  function read() {
+    var statuses = {};
+    KINDS.forEach(function (kind) {
+      statuses[kind[0]] = {
+        enabled: el(kind[0] + '.enabled').checked,
+        emoji: el(kind[0] + '.emoji').value,
+        text: el(kind[0] + '.text').value
+      };
+    });
+    return {
+      statuses: statuses,
+      protectedEmoji: el('protectedEmoji').value,
+      safetyMarginMinutes: el('safetyMarginMinutes').value
+    };
+  }
+
+  function showMessage(text, kind) {
+    var message = el('message');
+    message.textContent = text;
+    message.className = kind || '';
+  }
+
+  function clearErrors() {
+    var boxes = document.querySelectorAll('.error');
+    for (var i = 0; i < boxes.length; i++) boxes[i].textContent = '';
+    var inputs = document.querySelectorAll('[aria-invalid]');
+    for (var j = 0; j < inputs.length; j++) inputs[j].removeAttribute('aria-invalid');
+  }
+
+  function setBusy(busy) {
+    el('save').disabled = busy;
+    el('defaults').disabled = busy;
+  }
+
+  function save() {
+    clearErrors();
+    setBusy(true);
+    showMessage('Saving…');
+    google.script.run
+      .withSuccessHandler(function (result) {
+        setBusy(false);
+        if (result.settings) {
+          fill(result.settings);
+          showMessage('Saved. Applies from the next run, within a minute.', 'ok');
+          return;
+        }
+        Object.keys(result.errors).forEach(function (key) {
+          var box = el(key + '-error');
+          if (box) box.textContent = result.errors[key];
+          var input = el(key);
+          if (input) input.setAttribute('aria-invalid', 'true');
+        });
+        showMessage('Not saved, please fix the fields marked in red.', 'error');
+      })
+      .withFailureHandler(function (error) {
+        setBusy(false);
+        showMessage('Could not save: ' + error.message, 'error');
+      })
+      .saveSettingsFromPage(read());
+  }
+
+  buildRows();
+  el('save').addEventListener('click', save);
+  el('defaults').addEventListener('click', function () {
+    clearErrors();
+    fill(defaults);
+    showMessage('Defaults filled in. Click Save to keep them.');
+  });
+
+  google.script.run
+    .withSuccessHandler(function (data) {
+      defaults = data.defaults;
+      fill(data.settings);
+      el('loading').hidden = true;
+      el('content').hidden = false;
+    })
+    .withFailureHandler(function (error) {
+      el('loading').textContent = 'Could not load the settings: ' + error.message;
+    })
+    .getSettingsForPage();
+</script>
+</body>
+</html>
+`;
+
 // ---- Calendar.js ----
 
 /**
@@ -257,7 +658,7 @@ const TOKEN_PROPERTY = 'SLACK_USER_TOKEN';
 
 /** @returns {Status} */
 function getSlackStatus() {
-  return toStatus(slackCall('users.profile.get').profile);
+  return toStatus(slackCall_('users.profile.get').profile);
 }
 
 /**
@@ -265,7 +666,7 @@ function getSlackStatus() {
  * @returns {Status} the status as Slack stored it
  */
 function setSlackStatus(status) {
-  const res = slackCall('users.profile.set', {
+  const res = slackCall_('users.profile.set', {
     profile: {
       status_text: status.text,
       status_emoji: status.emoji,
@@ -283,7 +684,7 @@ function toStatus(profile) {
   };
 }
 
-function slackCall(method, body) {
+function slackCall_(method, body) {
   const token = PropertiesService.getScriptProperties().getProperty(TOKEN_PROPERTY);
   if (!token) throw new Error(`Script property ${TOKEN_PROPERTY} is not set`);
 
@@ -324,7 +725,7 @@ function tick() {
 
     const current = getSlackStatus();
     const events = fetchEvents(now);
-    const { state, write } = decide(saved && JSON.parse(saved), current, events, now, CONFIG);
+    const { state, write } = decide(saved && JSON.parse(saved), current, events, now, loadConfig());
 
     // Saved before writing: if the write goes through but this run dies before
     // committing it, the next run recognizes it instead of taking it for a manual change.
@@ -351,7 +752,7 @@ function showState() {
   const s = JSON.parse(saved);
   console.log(JSON.stringify({
     baselineSet: !isEmptyStatus(s.baseline),
-    baselineProtected: isProtected(s.baseline, CONFIG),
+    baselineProtected: isProtected(s.baseline, loadConfig()),
     baselineExpires: s.baseline.expiration > 0,
     applied: s.applied,
     skippedEvents: Object.keys(s.suppressed).length,
@@ -371,7 +772,8 @@ function diagnose() {
   const current = getSlackStatus();
   const events = fetchEvents(now);
 
-  const protectedNote = isProtected(current, CONFIG) ? ', with a protected emoji' : '';
+  const config = loadConfig();
+  const protectedNote = isProtected(current, config) ? ', with a protected emoji' : '';
   console.log(`Slack status: ${isEmptyStatus(current) ? 'empty' : 'set'}${protectedNote}`);
   console.log(`Events in your primary calendar right now: ${events.length}`);
   if (!events.length) {
@@ -381,13 +783,13 @@ function diagnose() {
   for (const ev of events) {
     const layer = eventLayer(ev);
     let verdict = layer ? `counts as ${layer}` : 'ignored';
-    if (layer && !CONFIG.statuses[layer]) verdict = `${layer}, disabled in CONFIG`;
+    if (layer && !config.statuses[layer]) verdict = `${layer}, disabled in settings`;
     if (!(ev.start <= now && now < ev.end)) verdict += ', not running yet';
     if (state && ev.id in state.suppressed) verdict += ', skipped after a manual change';
     console.log(`- ${ev.allDay ? 'all-day' : 'timed'} ${ev.eventType} event, ` +
       `${ev.transparent ? 'free' : 'busy'}, my response: ${ev.myResponse || 'none (own event)'}: ${verdict}`);
   }
-  const { write } = decide(state, current, events, now, CONFIG);
+  const { write } = decide(state, current, events, now, config);
   console.log(write ? 'The next run will change the status' : 'The next run will change nothing');
 }
 

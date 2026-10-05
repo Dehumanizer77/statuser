@@ -3,7 +3,7 @@ const TOKEN_PROPERTY = 'SLACK_USER_TOKEN';
 
 /** @returns {Status} */
 function getSlackStatus() {
-  return toStatus(slackCall('users.profile.get').profile);
+  return toStatus(slackCall_('users.profile.get').profile);
 }
 
 /**
@@ -11,7 +11,7 @@ function getSlackStatus() {
  * @returns {Status} the status as Slack stored it
  */
 function setSlackStatus(status) {
-  const res = slackCall('users.profile.set', {
+  const res = slackCall_('users.profile.set', {
     profile: {
       status_text: status.text,
       status_emoji: status.emoji,
@@ -29,7 +29,7 @@ function toStatus(profile) {
   };
 }
 
-function slackCall(method, body) {
+function slackCall_(method, body) {
   const token = PropertiesService.getScriptProperties().getProperty(TOKEN_PROPERTY);
   if (!token) throw new Error(`Script property ${TOKEN_PROPERTY} is not set`);
 
