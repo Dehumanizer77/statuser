@@ -31,14 +31,18 @@ Rules:
 - Counted: tentative invitations, your own events without guests, all-day events
   (even when marked as free, which is Google's default for them).
 - Status text is always generic, event titles are never shown or even downloaded.
-- **A manual change during an event wins:** that event is no longer enforced and
-  nothing is restored when it ends. The next event overrides the status again.
+- **A manual change during an event wins:** that event is no longer enforced, even
+  if it gets extended, and nothing is restored when it ends. The next event
+  overrides the status again.
 - **Protected emoji** (set on the settings page): a status with one of them is
   never overwritten. Setting one during an event pauses it rather than skipping
-  it: once the protected status is gone, the event status comes back.
+  it: once the protected status expires or you clear it, the event status comes
+  back. Replacing it with another status is a manual change like any other and
+  skips the event.
 - Our status is set to expire a few minutes (5 by default) after the event ends,
   so it can't get stuck when the script stops running. Once it runs again, the
-  baseline comes back.
+  baseline comes back. If you cleared our status by hand in the meantime, that
+  can't be told from it having expired, so the baseline comes back then too.
 
 ## Setup
 
@@ -94,23 +98,26 @@ you. It always runs the latest saved code, so there's nothing to redeploy.
 - **Change statuses, emoji or protected emoji** on the settings page. Changes
   apply from the next run, within a minute.
 - **Pause** Statuser for a while, also in the middle of an event: set a status with
-  a protected emoji (e.g. `:lock:`) and Slack's *Clear after…*. When it expires,
-  a running event gets applied.
+  a protected emoji (e.g. `:lock:`) and Slack's *Clear after…*. When it expires
+  or you clear it, a running event gets applied.
 - **Skip** the current event: change your status by hand while it runs.
 - Logs are under **Executions** in the Apps Script editor. They only say what
   happened (e.g. *Applied meeting status*, *Restored own status*), never status
-  texts or event details.
+  texts, emoji, event titles or event IDs.
 - Status not changing as expected? Run `diagnose`: it lists the events running
-  right now, whether each counts and why, and what the next run will do.
-- `showState` logs a summary of the saved state (again without texts or event
-  details), `resetState` forgets it. Run the latter only while no event status is
-  set, otherwise that status becomes the baseline.
+  right now, whether each counts and why, and what the next run will do. For that
+  it logs how many events there are and each one's kind, whether it's free or
+  busy and your response to it.
+- `showState` logs a summary of the saved state (again without texts, emoji or
+  event IDs, but with the time of the last check), `resetState` forgets it. Run
+  the latter only while no event status is set, otherwise that status becomes
+  the baseline.
 
 ## Permissions
 
 | Where | Permission | Why |
 |---|---|---|
-| Slack | `users.profile:write` | set the status (Slack has no narrower scope, it covers your whole profile) |
+| Slack | `users.profile:write` | set the status (Slack has no narrower scope, it covers your whole profile; only the status text, emoji and expiration are ever sent) |
 | Slack | `users.profile:read` | read the current status to restore it later |
 | Google | `calendar.events.owned.readonly` | read events on calendars you own |
 | Google | `script.external_request` | call the Slack API, restricted to `https://slack.com/api/` by `urlFetchWhitelist` |
@@ -124,10 +131,21 @@ you. It always runs the latest saved code, so there's nothing to redeploy.
   with their own token.
 - The settings page is only reachable through the test deployment (`/dev`), which
   needs edit access. The manifest also limits any regular web app deployment to
-  you (`"access": "MYSELF"`), so don't create one with wider access.
-- The token doesn't expire. If it may have leaked: open the Slack app settings →
-  **OAuth & Permissions** → **Revoke All OAuth Tokens** → **Revoke Tokens**, then
-  **Reinstall to Workspace** and put the new token into `SLACK_USER_TOKEN`.
+  you (`"access": "MYSELF"`), so don't create one with wider access. The page
+  doesn't check who opened it: whoever can open it can call the script as you,
+  i.e. read and change the settings, run a check or forget the saved state.
+  The functions that talk to Slack, the calendar and the script properties
+  directly are out of the page's reach (their names end with `_`), but that
+  only narrows what a visitor could do, it's no access control.
+- The token doesn't expire. Token rotation is off in `slack-manifest.json` on
+  purpose: a rotated token lasts 12 hours and has to be refreshed, which Statuser
+  doesn't do, so turning it on would stop the script within a day. If the token
+  may have leaked: open the Slack app settings → **OAuth & Permissions** →
+  **Revoke All OAuth Tokens** → **Revoke Tokens**, then **Reinstall to
+  Workspace** and put the new token into `SLACK_USER_TOKEN`.
+- What `diagnose` and `showState` log (see [Usage](#usage)) says something about
+  your day even without texts. Treat it as private when you share a log, and
+  keep in mind that anyone with access to the project can read the logs.
 
 ## Development
 
