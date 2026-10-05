@@ -1,8 +1,14 @@
+/**
+ * Functions run from the editor or by the trigger. They have to stay public, like
+ * the three the settings page calls (Settings.js). Everything else that reaches
+ * Slack, the calendar or the script properties ends with an underscore, which puts
+ * it out of reach of google.script.run, i.e. of whoever can open the settings page.
+ */
 const STATE_PROPERTY = 'STATE';
 
 /**
  * Entry point, run every minute by a time-driven trigger.
- * Logs only what happened, never status texts or event details.
+ * Logs only what happened, never status texts, emoji or event IDs.
  */
 function tick() {
   const lock = LockService.getScriptLock();
@@ -12,15 +18,15 @@ function tick() {
     const saved = props.getProperty(STATE_PROPERTY);
     const now = Math.floor(Date.now() / 1000);
 
-    const current = getSlackStatus();
-    const events = fetchEvents(now);
-    const { state, write } = decide(saved && JSON.parse(saved), current, events, now, loadConfig());
+    const current = getSlackStatus_();
+    const events = fetchEvents_(now);
+    const { state, write } = decide(saved && JSON.parse(saved), current, events, now, loadConfig_());
 
     // Saved before writing: if the write goes through but this run dies before
     // committing it, the next run recognizes it instead of taking it for a manual change.
     props.setProperty(STATE_PROPERTY, JSON.stringify(state));
     if (write) {
-      const committed = commitWrite(state, setSlackStatus(write));
+      const committed = commitWrite(state, setSlackStatus_(write));
       props.setProperty(STATE_PROPERTY, JSON.stringify(committed));
       console.log(describeWrite(committed));
     } else {
@@ -31,7 +37,10 @@ function tick() {
   }
 }
 
-/** Logs a summary of the saved state, without status texts or event details. */
+/**
+ * Logs a summary of the saved state: no status texts, emoji or event IDs, but it
+ * does tell when the last check ran and how many events are being skipped.
+ */
 function showState() {
   const saved = PropertiesService.getScriptProperties().getProperty(STATE_PROPERTY);
   if (!saved) {
@@ -41,7 +50,7 @@ function showState() {
   const s = JSON.parse(saved);
   console.log(JSON.stringify({
     baselineSet: !isEmptyStatus(s.baseline),
-    baselineProtected: isProtected(s.baseline, loadConfig()),
+    baselineProtected: isProtected(s.baseline, loadConfig_()),
     baselineExpires: s.baseline.expiration > 0,
     applied: s.applied,
     skippedEvents: Object.keys(s.suppressed).length,
@@ -51,17 +60,20 @@ function showState() {
 }
 
 /**
- * Explains what the next run would do and why, without status texts or event details.
- * Run it from the editor when the status doesn't change as expected.
+ * Explains what the next run would do and why. Run it from the editor when the
+ * status doesn't change as expected.
+ * Logs no status texts, emoji or event IDs, but it does describe the events: how
+ * many there are, each one's kind, whether it's free or busy and your response.
  */
 function diagnose() {
   const now = Math.floor(Date.now() / 1000);
   const saved = PropertiesService.getScriptProperties().getProperty(STATE_PROPERTY);
   const state = saved && JSON.parse(saved);
-  const current = getSlackStatus();
-  const events = fetchEvents(now);
+  const current = getSlackStatus_();
+  const events = fetchEvents_(now);
 
-  const config = loadConfig();
+  const config = loadConfig_();
+  const { state: next, write } = decide(state, current, events, now, config);
   const protectedNote = isProtected(current, config) ? ', with a protected emoji' : '';
   console.log(`Slack status: ${isEmptyStatus(current) ? 'empty' : 'set'}${protectedNote}`);
   console.log(`Events in your primary calendar right now: ${events.length}`);
@@ -74,11 +86,10 @@ function diagnose() {
     let verdict = layer ? `counts as ${layer}` : 'ignored';
     if (layer && !config.statuses[layer]) verdict = `${layer}, disabled in settings`;
     if (!(ev.start <= now && now < ev.end)) verdict += ', not running yet';
-    if (state && ev.id in state.suppressed) verdict += ', skipped after a manual change';
+    if (ev.id in next.suppressed) verdict += ', skipped after a manual change';
     console.log(`- ${ev.allDay ? 'all-day' : 'timed'} ${ev.eventType} event, ` +
       `${ev.transparent ? 'free' : 'busy'}, my response: ${ev.myResponse || 'none (own event)'}: ${verdict}`);
   }
-  const { write } = decide(state, current, events, now, config);
   console.log(write ? 'The next run will change the status' : 'The next run will change nothing');
 }
 

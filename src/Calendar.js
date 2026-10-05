@@ -8,7 +8,7 @@
  * @param {number} now unix seconds
  * @returns {CalEvent[]}
  */
-function fetchEvents(now) {
+function fetchEvents_(now) {
   const events = [];
   let pageToken = null;
   do {

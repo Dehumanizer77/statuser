@@ -98,14 +98,14 @@ function validateSettings(input) {
 }
 
 /** Saved settings merged with the defaults. */
-function loadSettings() {
+function loadSettings_() {
   const saved = PropertiesService.getScriptProperties().getProperty(SETTINGS_PROPERTY);
   return withDefaults(saved ? JSON.parse(saved) : null);
 }
 
 /** @returns {Config} the configuration runs use */
-function loadConfig() {
-  return toConfig(loadSettings());
+function loadConfig_() {
+  return toConfig(loadSettings_());
 }
 
 /** Serves the settings page. */
@@ -117,7 +117,7 @@ function doGet() {
 
 /** Called by the settings page when it opens. */
 function getSettingsForPage() {
-  return { settings: loadSettings(), defaults: DEFAULT_SETTINGS };
+  return { settings: loadSettings_(), defaults: DEFAULT_SETTINGS };
 }
 
 /**

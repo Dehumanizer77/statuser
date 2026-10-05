@@ -127,6 +127,56 @@ test('a status cleared by hand during an event is respected', () => {
   assert.deepEqual(sim.slack.status, EMPTY);
 });
 
+test('a skipped event that gets extended stays skipped', () => {
+  const sim = simulate();
+  sim.tick(at(10), [event('a', at(10), at(11))]);
+  sim.slack.status = LUNCH;
+  sim.tick(at(10, 1), [event('a', at(10), at(11))]);
+  const extended = [event('a', at(10), at(12))];
+  assert.equal(sim.tick(at(10, 30), extended), null);
+  assert.equal(sim.tick(at(11), extended), null);
+  assert.equal(sim.tick(at(11, 30), extended), null);
+  assert.equal(sim.tick(at(12)), null);
+  assert.deepEqual(sim.slack.status, LUNCH);
+});
+
+test('a skipped event extended at the last moment stays skipped', () => {
+  const sim = simulate();
+  const events = [event('a', at(10), at(11))];
+  sim.tick(at(10), events);
+  sim.slack.status = LUNCH;
+  sim.tick(at(10, 1), events);
+  sim.tick(at(10, 59), events);
+  // extended after the 10:59 run, first seen when it would have ended
+  const extended = [event('a', at(10), at(12))];
+  assert.equal(sim.tick(at(11), extended), null);
+  assert.equal(sim.tick(at(11, 59), extended), null);
+  assert.deepEqual(sim.slack.status, LUNCH);
+});
+
+test('a new event overrides the manual status while an extended skipped one still runs', () => {
+  const sim = simulate();
+  sim.tick(at(10), [event('a', at(10), at(11))]);
+  sim.slack.status = LUNCH;
+  sim.tick(at(10, 1), [event('a', at(10), at(11))]);
+  const events = [event('a', at(10), at(12)), event('b', at(11), at(11, 30))];
+  assert.equal(sim.tick(at(10, 30), events), null);
+  assert.deepEqual(sim.tick(at(11), events), meeting(at(11, 30)));
+  assert.deepEqual(sim.tick(at(11, 30), events), LUNCH);
+  assert.equal(sim.tick(at(12), events), null);
+});
+
+test('a skipped event moved to a later time counts as a new one', () => {
+  const sim = simulate();
+  sim.tick(at(10), [event('a', at(10), at(11))]);
+  sim.slack.status = LUNCH;
+  sim.tick(at(10, 1), [event('a', at(10), at(11))]);
+  // moved to the afternoon; the script didn't run in between
+  const moved = [event('a', at(14), at(15))];
+  assert.deepEqual(sim.tick(at(14), moved), meeting(at(15)));
+  assert.deepEqual(sim.tick(at(15), moved), LUNCH);
+});
+
 test('declined, unanswered, free and non-meeting events are ignored', () => {
   const sim = simulate();
   const events = [
@@ -211,6 +261,71 @@ test('a pause does not undo skipping an event', () => {
   assert.equal(sim.tick(at(11), events), null);
 });
 
+test('a pause cleared by hand resumes the running meeting', () => {
+  const sim = simulate();
+  const events = [event('a', at(10), at(11))];
+  sim.tick(at(10), events);
+  sim.slack.status = PAUSE; // no expiration
+  assert.equal(sim.tick(at(10, 1), events), null);
+  sim.slack.status = EMPTY;
+  assert.deepEqual(sim.tick(at(10, 2), events), meeting(at(11)));
+  assert.deepEqual(sim.tick(at(11), events), EMPTY);
+});
+
+test('a timed pause cleared by hand before it expires resumes the running meeting', () => {
+  const sim = simulate();
+  const events = [event('a', at(10), at(11))];
+  sim.tick(at(10), events);
+  sim.slack.status = { ...PAUSE, expiration: at(10, 30) };
+  assert.equal(sim.tick(at(10, 1), events), null);
+  sim.slack.status = EMPTY;
+  assert.deepEqual(sim.tick(at(10, 2), events), meeting(at(11)));
+  assert.deepEqual(sim.tick(at(11), events), EMPTY);
+});
+
+test('a pause from before the meeting, cleared during it, lets the meeting apply', () => {
+  const sim = simulate(PAUSE);
+  const events = [event('a', at(10), at(11))];
+  assert.equal(sim.tick(at(9, 50), events), null);
+  assert.equal(sim.tick(at(10), events), null);
+  sim.slack.status = EMPTY;
+  assert.deepEqual(sim.tick(at(10, 15), events), meeting(at(11)));
+});
+
+test('clearing a pause by hand does not undo skipping an event', () => {
+  const sim = simulate();
+  const events = [event('a', at(10), at(11))];
+  sim.tick(at(10), events);
+  sim.slack.status = LUNCH; // skips the meeting
+  sim.tick(at(10, 1), events);
+  sim.slack.status = PAUSE;
+  sim.tick(at(10, 2), events);
+  sim.slack.status = EMPTY;
+  assert.equal(sim.tick(at(10, 3), events), null);
+  assert.equal(sim.tick(at(11), events), null);
+});
+
+test('replacing a pause with an ordinary status skips the running meeting', () => {
+  const sim = simulate();
+  const events = [event('a', at(10), at(11))];
+  sim.tick(at(10), events);
+  sim.slack.status = PAUSE;
+  sim.tick(at(10, 1), events);
+  sim.slack.status = LUNCH;
+  assert.equal(sim.tick(at(10, 2), events), null);
+  assert.equal(sim.tick(at(11), events), null);
+  assert.deepEqual(sim.slack.status, LUNCH);
+});
+
+test('clearing an event status by hand is a skip even when its emoji is protected', () => {
+  const sim = simulate(MANUAL, { ...CONFIG, protectedEmoji: [CONFIG.statuses.meeting.emoji] });
+  const events = [event('a', at(10), at(11))];
+  assert.deepEqual(sim.tick(at(10), events), meeting(at(11)));
+  sim.slack.status = EMPTY;
+  assert.equal(sim.tick(at(10, 15), events), null);
+  assert.equal(sim.tick(at(11), events), null);
+});
+
 test('a manual status that expired during a meeting is not restored or kept', () => {
   const sim = simulate({ ...LUNCH, expiration: at(10, 30) });
   const events = [event('a', at(10), at(11))];
@@ -249,6 +364,75 @@ test('a manual change after an unconfirmed write wins', () => {
   assert.equal(sim.tick(at(10, 5), events), null);
   assert.equal(sim.tick(at(11), events), null);
   assert.deepEqual(sim.slack.status, LUNCH);
+});
+
+test('an unconfirmed write that expired before the next run keeps the baseline', () => {
+  const sim = simulate();
+  sim.tick(at(10), [event('a', at(10), at(11))], 'unconfirmed');
+  sim.slack.status = EMPTY; // Slack cleared it at 11:05, the script was not running
+  assert.deepEqual(sim.tick(at(12)), MANUAL);
+  assert.deepEqual(sim.state.baseline, MANUAL);
+});
+
+test('an unconfirmed write that expired is followed by the next event, then the baseline', () => {
+  const sim = simulate();
+  const events = [event('a', at(10), at(11)), event('b', at(12), at(13))];
+  sim.tick(at(10), events, 'unconfirmed');
+  sim.slack.status = EMPTY; // Slack cleared it at 11:05, the script was not running
+  assert.deepEqual(sim.tick(at(12), events), meeting(at(13)));
+  assert.deepEqual(sim.tick(at(13), events), MANUAL);
+});
+
+test('an unconfirmed write that outlived an expiring baseline leaves the status empty', () => {
+  const sim = simulate({ ...LUNCH, expiration: at(10, 30) });
+  sim.tick(at(9, 55));
+  sim.tick(at(10), [event('a', at(10), at(11))], 'unconfirmed');
+  sim.slack.status = EMPTY; // Slack cleared it at 11:05, the script was not running
+  assert.equal(sim.tick(at(12)), null);
+  assert.deepEqual(sim.state.baseline, EMPTY);
+});
+
+test('a failed write followed by downtime changes nothing', () => {
+  const sim = simulate();
+  sim.tick(at(10), [event('a', at(10), at(11))], 'failed');
+  assert.equal(sim.tick(at(12)), null);
+  assert.deepEqual(sim.state.baseline, MANUAL);
+  assert.deepEqual(sim.slack.status, MANUAL);
+});
+
+test('a failed write over an empty status is retried', () => {
+  const sim = simulate(EMPTY);
+  const events = [event('a', at(10), at(11))];
+  assert.deepEqual(sim.tick(at(10), events, 'failed'), meeting(at(11)));
+  assert.deepEqual(sim.tick(at(10, 1), events), meeting(at(11)));
+  assert.deepEqual(sim.tick(at(11), events), EMPTY);
+});
+
+test('a failed write over a status of ours, followed by downtime, still restores the baseline', () => {
+  const sim = simulate();
+  assert.deepEqual(sim.tick(at(8), [event('ooo', at(8), at(18), { eventType: 'outOfOffice' })]), ooo(at(18)));
+  // the out-of-office event got deleted, a meeting runs instead
+  sim.tick(at(10), [event('a', at(10), at(11))], 'failed');
+  assert.deepEqual(sim.slack.status, ooo(at(18)));
+  assert.deepEqual(sim.tick(at(12)), MANUAL);
+});
+
+test('a manual status set after an unconfirmed write survives downtime', () => {
+  const sim = simulate();
+  sim.tick(at(10), [event('a', at(10), at(11))], 'unconfirmed');
+  sim.slack.status = LUNCH;
+  assert.equal(sim.tick(at(12)), null);
+  assert.deepEqual(sim.state.baseline, LUNCH);
+});
+
+test('a status cleared by hand right after an unconfirmed write is respected', () => {
+  const sim = simulate();
+  const events = [event('a', at(10), at(11))];
+  sim.tick(at(10), events, 'unconfirmed');
+  sim.slack.status = EMPTY; // long before the write would expire
+  assert.equal(sim.tick(at(10, 5), events), null);
+  assert.equal(sim.tick(at(11), events), null);
+  assert.deepEqual(sim.state.baseline, EMPTY);
 });
 
 test('a manual status with time left is restored with its original expiration', () => {

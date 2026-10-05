@@ -2,7 +2,7 @@
 const TOKEN_PROPERTY = 'SLACK_USER_TOKEN';
 
 /** @returns {Status} */
-function getSlackStatus() {
+function getSlackStatus_() {
   return toStatus(slackCall_('users.profile.get').profile);
 }
 
@@ -10,7 +10,7 @@ function getSlackStatus() {
  * @param {Status} status
  * @returns {Status} the status as Slack stored it
  */
-function setSlackStatus(status) {
+function setSlackStatus_(status) {
   const res = slackCall_('users.profile.set', {
     profile: {
       status_text: status.text,

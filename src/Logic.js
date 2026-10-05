@@ -55,6 +55,11 @@ function baselineAt(baseline, now) {
   return baseline.expiration > 0 && baseline.expiration <= now ? EMPTY_STATUS : baseline;
 }
 
+/** Whether Slack may have cleared the status by `now` because its time ran out. */
+function mayHaveExpired(s, now) {
+  return s.expiration > 0 && s.expiration <= now + EXPIRY_TOLERANCE;
+}
+
 /**
  * Which layer an event belongs to, or null if it should not affect the status.
  * @param {CalEvent} ev
@@ -81,15 +86,19 @@ function topLayer(active) {
 
 /**
  * Settles a write the previous run started but didn't confirm. If Slack shows it,
- * it went through; otherwise it didn't, and whatever Slack shows now is judged
+ * it went through. If Slack shows nothing and the written status would have run
+ * out by now, it's assumed to have gone through too: decide() then treats it like
+ * any other status of ours that expired, so the baseline survives. (Nothing tells
+ * such a status from one cleared by hand while no run happened.)
+ * Otherwise the write didn't go through, and whatever Slack shows now is judged
  * against `lastSeen` as usual (the write is retried, or a manual change wins).
  */
-function resolvePending(state, current) {
+function resolvePending(state, current, now) {
   if (!state.pending) return state;
   const { pending, ...rest } = state;
-  return sameStatus(current, pending.status)
-    ? { ...rest, lastSeen: current, applied: pending.applied }
-    : rest;
+  const wentThrough = sameStatus(current, pending.status) ||
+    (isEmptyStatus(current) && mayHaveExpired(pending.status, now));
+  return wentThrough ? { ...rest, lastSeen: pending.status, applied: pending.applied } : rest;
 }
 
 /**
@@ -115,23 +124,27 @@ function commitWrite(state, written) {
  */
 function decide(prev, current, events, now, config) {
   const state = prev
-    ? resolvePending({ ...prev, suppressed: { ...prev.suppressed } }, current)
+    ? resolvePending({ ...prev, suppressed: { ...prev.suppressed } }, current, now)
     : { baseline: current, lastSeen: current, applied: null, suppressed: {}, running: {}, lastCheck: null };
   const wasRunning = state.running || {};
 
+  const ongoing = events.filter((ev) => ev.start <= now && now < ev.end);
+  const active = ongoing
+    .map((ev) => ({ ev, layer: eventLayer(ev) }))
+    .filter((a) => a.layer && config.statuses[a.layer]);
+
+  // A skipped event stays skipped until it ends, so its end follows the calendar:
+  // it may get extended, even at the last moment. One moved to a later time
+  // altogether counts as a new event.
+  for (const ev of ongoing) {
+    if (ev.id in state.suppressed && ev.start < state.suppressed[ev.id]) state.suppressed[ev.id] = ev.end;
+  }
   for (const id of Object.keys(state.suppressed)) {
     if (state.suppressed[id] <= now) delete state.suppressed[id];
   }
 
-  const active = events
-    .filter((ev) => ev.start <= now && now < ev.end)
-    .map((ev) => ({ ev, layer: eventLayer(ev) }))
-    .filter((a) => a.layer && config.statuses[a.layer]);
-
   if (!sameStatus(current, state.lastSeen)) {
-    const expired = isEmptyStatus(current) && state.lastSeen.expiration > 0 &&
-      state.lastSeen.expiration <= now + EXPIRY_TOLERANCE;
-    if (expired) {
+    if (isEmptyStatus(current) && mayHaveExpired(state.lastSeen, now)) {
       // Slack cleared a status whose time ran out, that's not a manual change.
       // If it was ours, the baseline gets restored below.
       if (!state.applied) state.baseline = EMPTY_STATUS;
@@ -139,9 +152,12 @@ function decide(prev, current, events, now, config) {
       // Changed by hand: it becomes the new baseline and events seen running at the
       // previous check are no longer enforced. Events that started (or were added
       // to the calendar) since then still override it. A protected status is
-      // a pause rather than a skip: the events resume once it's gone.
+      // a pause rather than a skip: the events resume once it's gone. So neither
+      // setting one nor clearing your own skips anything.
+      const paused = isProtected(current, config);
+      const unpaused = isEmptyStatus(current) && !state.applied && isProtected(state.lastSeen, config);
       state.baseline = current;
-      if (!isProtected(current, config)) {
+      if (!paused && !unpaused) {
         for (const a of active) {
           if (a.ev.id in wasRunning) state.suppressed[a.ev.id] = a.ev.end;
         }

@@ -12,8 +12,14 @@ const DAY = 1790035200; // some midnight, the exact date doesn't matter
 const at = (h, m = 0) => DAY + h * 3600 + m * 60;
 const iso = (t) => new Date(t * 1000).toISOString();
 
+const EMPTY = { text: '', emoji: '', expiration: 0 };
 const SECRET = { text: 'Doctor appointment SECRET-MARKER', emoji: ':hospital:', expiration: 0 };
 const LUNCH = { text: 'Lunch', emoji: ':pizza:', expiration: 0 };
+
+/** The functions that stay public on purpose: run from the editor, by the trigger or by the settings page. */
+const ENTRY_POINTS = [
+  'tick', 'showState', 'diagnose', 'resetState', 'doGet', 'getSettingsForPage', 'saveSettingsFromPage',
+];
 
 /** An event as the Calendar API returns it. */
 const gEvent = (id, start, end, extra = {}) => ({
@@ -23,7 +29,7 @@ const gEvent = (id, start, end, extra = {}) => ({
 /** Loads the app into a fresh context with fake Slack, Calendar and properties. */
 function loadApp(status = SECRET) {
   const logs = [];
-  const slack = { status, writes: 0, rejectNextWrite: false, loseNextResponse: false };
+  const slack = { status, writes: 0, lastWrite: null, rejectNextWrite: false, loseNextResponse: false };
   const calendar = { pages: [{ items: [] }], requests: [] };
   const props = {
     data: { SLACK_USER_TOKEN: 'xoxp-test' },
@@ -77,7 +83,8 @@ function loadApp(status = SECRET) {
           slack.rejectNextWrite = false;
           return response({ ok: false, error: 'ratelimited' });
         }
-        const p = JSON.parse(options.payload).profile;
+        slack.lastWrite = JSON.parse(options.payload);
+        const p = slack.lastWrite.profile;
         slack.status = { text: p.status_text, emoji: p.status_emoji, expiration: p.status_expiration };
         slack.writes += 1;
         if (slack.loseNextResponse) {
@@ -107,6 +114,14 @@ function loadApp(status = SECRET) {
     failSetProperty(n) {
       props.setCalls = 0;
       props.failAt = n;
+    },
+    /** The app's top-level functions: their source by name. */
+    functions() {
+      const sources = {};
+      for (const name of Object.keys(ctx)) {
+        if (typeof ctx[name] === 'function') sources[name] = String(ctx[name]);
+      }
+      return sources;
     },
   };
 }
@@ -153,6 +168,17 @@ test('diagnose explains why an event does or does not count', () => {
   assert.match(empty.logs.join('\n'), /Events in your primary calendar right now: 0\nIs the event running/);
 });
 
+test('diagnose reports an event the next run is going to skip', () => {
+  const app = loadApp();
+  app.calendar.pages = [{ items: [gEvent('a', at(10), at(11))] }];
+  app.run('tick', at(10));
+  app.slack.status = LUNCH; // changed by hand, no run has seen it yet
+  app.run('diagnose', at(10, 1));
+  const output = app.logs.join('\n');
+  assert.match(output, /counts as meeting, skipped after a manual change/);
+  assert.match(output, /The next run will change nothing/);
+});
+
 test('a Slack write whose state commit fails is recognized on the next run', () => {
   const app = loadApp();
   app.calendar.pages = [{ items: [gEvent('a', at(10), at(11))] }];
@@ -181,6 +207,21 @@ test('a Slack write whose response is lost is recognized on the next run', () =>
   assert.deepEqual(app.state().baseline, SECRET);
   app.run('tick', at(11));
   assert.deepEqual(app.slack.status, SECRET);
+});
+
+test('an unconfirmed Slack write that expired before the next run keeps the own status', () => {
+  const app = loadApp();
+  app.calendar.pages = [{ items: [gEvent('a', at(10), at(11))] }];
+  app.run('tick', at(9, 59));
+  app.failSetProperty(2); // the commit after the Slack write
+  assert.throws(() => app.run('tick', at(10)), /Properties unavailable/);
+  app.failSetProperty(null);
+
+  app.slack.status = EMPTY; // Slack cleared it at 11:05, no run until noon
+  app.calendar.pages = [{ items: [] }];
+  app.run('tick', at(12));
+  assert.deepEqual(app.slack.status, SECRET);
+  assert.deepEqual(app.state().baseline, SECRET);
 });
 
 test('a failure before the Slack write changes nothing and is retried', () => {
@@ -225,6 +266,27 @@ test('a manual change during recovery wins', () => {
   app.run('tick', at(11));
   assert.deepEqual(app.slack.status, LUNCH);
   assert.equal(app.slack.writes, 1);
+});
+
+test('a status write sends nothing but the three status fields', () => {
+  const app = loadApp();
+  app.call('setSlackStatus_', { ...LUNCH, real_name: 'Somebody Else', fields: { title: 'Boss' } });
+  assert.deepEqual(app.slack.lastWrite, {
+    profile: { status_text: 'Lunch', status_emoji: ':pizza:', status_expiration: 0 },
+  });
+});
+
+test('the settings page can reach Slack, the calendar and the properties only through the entry points', () => {
+  const functions = loadApp().functions();
+  for (const name of ENTRY_POINTS) assert.ok(name in functions, `${name} is missing`);
+
+  // Only names without a trailing underscore can be called by google.script.run.
+  const callable = Object.keys(functions).filter((name) => !name.endsWith('_') && !ENTRY_POINTS.includes(name));
+  assert.ok(callable.includes('decide'));
+  for (const name of callable) {
+    assert.doesNotMatch(functions[name], /\b(PropertiesService|UrlFetchApp|LockService|HtmlService|Calendar)\b|\w_\(/,
+      `${name} reaches a service, it should end with an underscore`);
+  }
 });
 
 test('events on later calendar pages are used', () => {

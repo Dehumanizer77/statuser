@@ -85,6 +85,11 @@ function baselineAt(baseline, now) {
   return baseline.expiration > 0 && baseline.expiration <= now ? EMPTY_STATUS : baseline;
 }
 
+/** Whether Slack may have cleared the status by `now` because its time ran out. */
+function mayHaveExpired(s, now) {
+  return s.expiration > 0 && s.expiration <= now + EXPIRY_TOLERANCE;
+}
+
 /**
  * Which layer an event belongs to, or null if it should not affect the status.
  * @param {CalEvent} ev
@@ -111,15 +116,19 @@ function topLayer(active) {
 
 /**
  * Settles a write the previous run started but didn't confirm. If Slack shows it,
- * it went through; otherwise it didn't, and whatever Slack shows now is judged
+ * it went through. If Slack shows nothing and the written status would have run
+ * out by now, it's assumed to have gone through too: decide() then treats it like
+ * any other status of ours that expired, so the baseline survives. (Nothing tells
+ * such a status from one cleared by hand while no run happened.)
+ * Otherwise the write didn't go through, and whatever Slack shows now is judged
  * against `lastSeen` as usual (the write is retried, or a manual change wins).
  */
-function resolvePending(state, current) {
+function resolvePending(state, current, now) {
   if (!state.pending) return state;
   const { pending, ...rest } = state;
-  return sameStatus(current, pending.status)
-    ? { ...rest, lastSeen: current, applied: pending.applied }
-    : rest;
+  const wentThrough = sameStatus(current, pending.status) ||
+    (isEmptyStatus(current) && mayHaveExpired(pending.status, now));
+  return wentThrough ? { ...rest, lastSeen: pending.status, applied: pending.applied } : rest;
 }
 
 /**
@@ -145,23 +154,27 @@ function commitWrite(state, written) {
  */
 function decide(prev, current, events, now, config) {
   const state = prev
-    ? resolvePending({ ...prev, suppressed: { ...prev.suppressed } }, current)
+    ? resolvePending({ ...prev, suppressed: { ...prev.suppressed } }, current, now)
     : { baseline: current, lastSeen: current, applied: null, suppressed: {}, running: {}, lastCheck: null };
   const wasRunning = state.running || {};
 
+  const ongoing = events.filter((ev) => ev.start <= now && now < ev.end);
+  const active = ongoing
+    .map((ev) => ({ ev, layer: eventLayer(ev) }))
+    .filter((a) => a.layer && config.statuses[a.layer]);
+
+  // A skipped event stays skipped until it ends, so its end follows the calendar:
+  // it may get extended, even at the last moment. One moved to a later time
+  // altogether counts as a new event.
+  for (const ev of ongoing) {
+    if (ev.id in state.suppressed && ev.start < state.suppressed[ev.id]) state.suppressed[ev.id] = ev.end;
+  }
   for (const id of Object.keys(state.suppressed)) {
     if (state.suppressed[id] <= now) delete state.suppressed[id];
   }
 
-  const active = events
-    .filter((ev) => ev.start <= now && now < ev.end)
-    .map((ev) => ({ ev, layer: eventLayer(ev) }))
-    .filter((a) => a.layer && config.statuses[a.layer]);
-
   if (!sameStatus(current, state.lastSeen)) {
-    const expired = isEmptyStatus(current) && state.lastSeen.expiration > 0 &&
-      state.lastSeen.expiration <= now + EXPIRY_TOLERANCE;
-    if (expired) {
+    if (isEmptyStatus(current) && mayHaveExpired(state.lastSeen, now)) {
       // Slack cleared a status whose time ran out, that's not a manual change.
       // If it was ours, the baseline gets restored below.
       if (!state.applied) state.baseline = EMPTY_STATUS;
@@ -169,9 +182,12 @@ function decide(prev, current, events, now, config) {
       // Changed by hand: it becomes the new baseline and events seen running at the
       // previous check are no longer enforced. Events that started (or were added
       // to the calendar) since then still override it. A protected status is
-      // a pause rather than a skip: the events resume once it's gone.
+      // a pause rather than a skip: the events resume once it's gone. So neither
+      // setting one nor clearing your own skips anything.
+      const paused = isProtected(current, config);
+      const unpaused = isEmptyStatus(current) && !state.applied && isProtected(state.lastSeen, config);
       state.baseline = current;
-      if (!isProtected(current, config)) {
+      if (!paused && !unpaused) {
         for (const a of active) {
           if (a.ev.id in wasRunning) state.suppressed[a.ev.id] = a.ev.end;
         }
@@ -304,14 +320,14 @@ function validateSettings(input) {
 }
 
 /** Saved settings merged with the defaults. */
-function loadSettings() {
+function loadSettings_() {
   const saved = PropertiesService.getScriptProperties().getProperty(SETTINGS_PROPERTY);
   return withDefaults(saved ? JSON.parse(saved) : null);
 }
 
 /** @returns {Config} the configuration runs use */
-function loadConfig() {
-  return toConfig(loadSettings());
+function loadConfig_() {
+  return toConfig(loadSettings_());
 }
 
 /** Serves the settings page. */
@@ -323,7 +339,7 @@ function doGet() {
 
 /** Called by the settings page when it opens. */
 function getSettingsForPage() {
-  return { settings: loadSettings(), defaults: DEFAULT_SETTINGS };
+  return { settings: loadSettings_(), defaults: DEFAULT_SETTINGS };
 }
 
 /**
@@ -610,7 +626,7 @@ const SETTINGS_PAGE = String.raw`<!DOCTYPE html>
  * @param {number} now unix seconds
  * @returns {CalEvent[]}
  */
-function fetchEvents(now) {
+function fetchEvents_(now) {
   const events = [];
   let pageToken = null;
   do {
@@ -657,7 +673,7 @@ function toUnix(time, timeZone) {
 const TOKEN_PROPERTY = 'SLACK_USER_TOKEN';
 
 /** @returns {Status} */
-function getSlackStatus() {
+function getSlackStatus_() {
   return toStatus(slackCall_('users.profile.get').profile);
 }
 
@@ -665,7 +681,7 @@ function getSlackStatus() {
  * @param {Status} status
  * @returns {Status} the status as Slack stored it
  */
-function setSlackStatus(status) {
+function setSlackStatus_(status) {
   const res = slackCall_('users.profile.set', {
     profile: {
       status_text: status.text,
@@ -709,11 +725,17 @@ function slackCall_(method, body) {
 
 // ---- Main.js ----
 
+/**
+ * Functions run from the editor or by the trigger. They have to stay public, like
+ * the three the settings page calls (Settings.js). Everything else that reaches
+ * Slack, the calendar or the script properties ends with an underscore, which puts
+ * it out of reach of google.script.run, i.e. of whoever can open the settings page.
+ */
 const STATE_PROPERTY = 'STATE';
 
 /**
  * Entry point, run every minute by a time-driven trigger.
- * Logs only what happened, never status texts or event details.
+ * Logs only what happened, never status texts, emoji or event IDs.
  */
 function tick() {
   const lock = LockService.getScriptLock();
@@ -723,15 +745,15 @@ function tick() {
     const saved = props.getProperty(STATE_PROPERTY);
     const now = Math.floor(Date.now() / 1000);
 
-    const current = getSlackStatus();
-    const events = fetchEvents(now);
-    const { state, write } = decide(saved && JSON.parse(saved), current, events, now, loadConfig());
+    const current = getSlackStatus_();
+    const events = fetchEvents_(now);
+    const { state, write } = decide(saved && JSON.parse(saved), current, events, now, loadConfig_());
 
     // Saved before writing: if the write goes through but this run dies before
     // committing it, the next run recognizes it instead of taking it for a manual change.
     props.setProperty(STATE_PROPERTY, JSON.stringify(state));
     if (write) {
-      const committed = commitWrite(state, setSlackStatus(write));
+      const committed = commitWrite(state, setSlackStatus_(write));
       props.setProperty(STATE_PROPERTY, JSON.stringify(committed));
       console.log(describeWrite(committed));
     } else {
@@ -742,7 +764,10 @@ function tick() {
   }
 }
 
-/** Logs a summary of the saved state, without status texts or event details. */
+/**
+ * Logs a summary of the saved state: no status texts, emoji or event IDs, but it
+ * does tell when the last check ran and how many events are being skipped.
+ */
 function showState() {
   const saved = PropertiesService.getScriptProperties().getProperty(STATE_PROPERTY);
   if (!saved) {
@@ -752,7 +777,7 @@ function showState() {
   const s = JSON.parse(saved);
   console.log(JSON.stringify({
     baselineSet: !isEmptyStatus(s.baseline),
-    baselineProtected: isProtected(s.baseline, loadConfig()),
+    baselineProtected: isProtected(s.baseline, loadConfig_()),
     baselineExpires: s.baseline.expiration > 0,
     applied: s.applied,
     skippedEvents: Object.keys(s.suppressed).length,
@@ -762,17 +787,20 @@ function showState() {
 }
 
 /**
- * Explains what the next run would do and why, without status texts or event details.
- * Run it from the editor when the status doesn't change as expected.
+ * Explains what the next run would do and why. Run it from the editor when the
+ * status doesn't change as expected.
+ * Logs no status texts, emoji or event IDs, but it does describe the events: how
+ * many there are, each one's kind, whether it's free or busy and your response.
  */
 function diagnose() {
   const now = Math.floor(Date.now() / 1000);
   const saved = PropertiesService.getScriptProperties().getProperty(STATE_PROPERTY);
   const state = saved && JSON.parse(saved);
-  const current = getSlackStatus();
-  const events = fetchEvents(now);
+  const current = getSlackStatus_();
+  const events = fetchEvents_(now);
 
-  const config = loadConfig();
+  const config = loadConfig_();
+  const { state: next, write } = decide(state, current, events, now, config);
   const protectedNote = isProtected(current, config) ? ', with a protected emoji' : '';
   console.log(`Slack status: ${isEmptyStatus(current) ? 'empty' : 'set'}${protectedNote}`);
   console.log(`Events in your primary calendar right now: ${events.length}`);
@@ -785,11 +813,10 @@ function diagnose() {
     let verdict = layer ? `counts as ${layer}` : 'ignored';
     if (layer && !config.statuses[layer]) verdict = `${layer}, disabled in settings`;
     if (!(ev.start <= now && now < ev.end)) verdict += ', not running yet';
-    if (state && ev.id in state.suppressed) verdict += ', skipped after a manual change';
+    if (ev.id in next.suppressed) verdict += ', skipped after a manual change';
     console.log(`- ${ev.allDay ? 'all-day' : 'timed'} ${ev.eventType} event, ` +
       `${ev.transparent ? 'free' : 'busy'}, my response: ${ev.myResponse || 'none (own event)'}: ${verdict}`);
   }
-  const { write } = decide(state, current, events, now, config);
   console.log(write ? 'The next run will change the status' : 'The next run will change nothing');
 }
 
